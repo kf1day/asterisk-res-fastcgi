@@ -2,6 +2,8 @@
 #include <sys/un.h>
 #include "asterisk.h"
 
+#define AST_MODULE "res_fastcgi"
+
 ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 
 #include "asterisk/config.h"
@@ -16,9 +18,9 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 #define FCGI_MSG_SZ 0x4000
 #define FCGI_HEAD_SZ 0x08
 
-#define FCGI_CONFIG "res_fastcgi.conf"
+#define FCGI_CONFIG AST_MODULE".conf"
 #define FCGI_SOCKET "/var/run/asterisk/php-fpm.sock"
-#define FCGI_SCRIPT "/var/www/default.php"
+#define FCGI_SCRIPT "/var/lib/asterisk/manager.php"
 
 typedef enum {
 	FCGI_BEGIN = 1,
