@@ -16,7 +16,6 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 
 
 #define FCGI_MSG_SZ 0x4000
-#define FCGI_HEAD_SZ 0x08
 
 #define FCGI_CONFIG AST_MODULE".conf"
 #define FCGI_SOCKET "/var/run/asterisk/php-fpm.sock"
@@ -52,35 +51,31 @@ typedef enum {
 #define _B3( C ) ( ( C >> 24 ) | 0x80 )
 
 
-static uint8_t fcgi_set_header( char **msg, FCGI_TYPE type, int req_id, int len ) {
-	uint8_t pad = ( FCGI_HEAD_SZ - ( len % FCGI_HEAD_SZ ) ) % FCGI_HEAD_SZ;
+static uint8_t fcgi_set_header( char *msg, FCGI_TYPE type, int req_id, int len ) {
+	uint8_t pad = ( 8 - ( len % 8 ) ) % 8;
 
-//	assert( len >= 0 && len <= FCGI_MSG_SZ );
-
-	*(*msg)++	= 1;									//version
-	*(*msg)++	= (uint8_t) type;					//type
-	*(*msg)++	= (uint8_t) _B1( req_id );		//request ID B1
-	*(*msg)++	= (uint8_t) _B0( req_id );		//request ID B0
-	*(*msg)++	= (uint8_t) _B1( len );			//content length B1
-	*(*msg)++	= (uint8_t) _B0( len );			//content length B0
-	*(*msg)++	= pad;									//padding length
-	*(*msg)++	= 0;									//reserved
+	*msg++	= 1;									//version
+	*msg++	= (uint8_t) type;					//type
+	*msg++	= (uint8_t) _B1( req_id );		//request ID B1
+	*msg++	= (uint8_t) _B0( req_id );		//request ID B0
+	*msg++	= (uint8_t) _B1( len );			//content length B1
+	*msg++	= (uint8_t) _B0( len );			//content length B0
+	*msg++	= pad;									//padding length
+	*msg++	= 0;									//reserved
 
 	return pad;
 }
 
-static void fcgi_set_options( char **msg, FCGI_ROLE role, uint8_t keepalive ) {
+static void fcgi_set_options( char *msg, FCGI_ROLE role, uint8_t keepalive ) {
 
-//	assert( ( role >> 16 ) == 0 );
-
-	*(*msg)++	= (uint8_t) _B1( role );		//roleB1
-	*(*msg)++	= (uint8_t) _B0( role );		//roleB0
-	*(*msg)++	= ( ( keepalive ) ? 1 : 0 );	//flags
-	*(*msg)++	= 0;
-	*(*msg)++	= 0;
-	*(*msg)++	= 0;
-	*(*msg)++	= 0;
-	*(*msg)++	= 0;
+	*msg++	= (uint8_t) _B1( role );		//roleB1
+	*msg++	= (uint8_t) _B0( role );		//roleB0
+	*msg++	= ( ( keepalive ) ? 1 : 0 );	//flags
+	*msg++	= 0;
+	*msg++	= 0;
+	*msg++	= 0;
+	*msg++	= 0;
+	*msg++	= 0;
 
 
 }
@@ -128,10 +123,10 @@ static int fcgi_keyval( char *msg, const char *key, const char *val ) {
 }
 
 
-static int sock_stream;
+static int sock_stream, initial_packet_len;
 static struct sockaddr_un sock_options;
 static struct manager_custom_hook fcgi_hook;
-static char fcgi_packet[FCGI_MSG_SZ], script_name[0x1000];
+static char fcgi_request[FCGI_MSG_SZ], fcgi_responce[FCGI_MSG_SZ];
 
 
 static int fcgi_connect( char reconnect ) {
@@ -139,6 +134,7 @@ static int fcgi_connect( char reconnect ) {
 	
 	if ( reconnect && sock_stream ) {
 		shutdown( sock_stream, SHUT_RDWR );
+		read( sock_stream, fcgi_responce, FCGI_MSG_SZ );
 		close( sock_stream );
 	}
 	sock_stream = socket( AF_UNIX, SOCK_STREAM, 0 );
@@ -158,17 +154,11 @@ static int fcgi_connect( char reconnect ) {
 static int fcgi_worker( int category, const char *event, char *body ) {
 	static int id = 1;
 	
-	char *buf, *pos, *end;
-	uint8_t pad;
-	int len = 0;
+	char *pos, *end;
+	int res, len = initial_packet_len;
 	
-	buf = fcgi_packet;
 	
-	fcgi_set_header( &buf, FCGI_BEGIN, id, FCGI_HEAD_SZ );
-	fcgi_set_options( &buf, FCGI_RESPONDER, 1 );
-	
-	len += fcgi_keyval( buf+len+FCGI_HEAD_SZ, "SCRIPT_FILENAME", script_name );
-	len += fcgi_keyval( buf+len+FCGI_HEAD_SZ, "REQUEST_METHOD", "GET" );
+	fcgi_set_header( fcgi_request+0x00, FCGI_BEGIN, id, 0x08 );
 
 	pos = strstr( body, ": " );
 	while( pos ) {
@@ -176,54 +166,68 @@ static int fcgi_worker( int category, const char *event, char *body ) {
 		end = strstr( pos+2, "\r\n" );
 		*end = 0; // #TODO check if null
 		
-		len += fcgi_keyval( buf+len+FCGI_HEAD_SZ, body, pos+2 );
-		ast_debug( 3, "%s => %s\n", body, pos+2 );
+		len += fcgi_keyval( fcgi_request+0x18+len, body, pos+2 );
+//		ast_debug( 0, "%s => %s\n", body, pos+2 );
 		body = end+2;
 		
 		pos = strstr( body, ": " );
 	}
 	
-	pad = fcgi_set_header( &buf, FCGI_PARAMS, id, len );
-	buf += len;
-	for( len = 0; len < pad; len++ ) {
-		*buf++ = 0;
+	res = fcgi_set_header( fcgi_request+0x10, FCGI_PARAMS, id, len );
+	for( ; res > 0; res-- ) {
+		fcgi_request[0x18+len] = 0;
+		len++;
 	}
-	fcgi_set_header( &buf, FCGI_PARAMS, id, 0 );
-	fcgi_set_header( &buf, FCGI_STDIN, id, 0 );
-	len = write( sock_stream, fcgi_packet, (int)( buf - fcgi_packet ) );
+	fcgi_set_header( fcgi_request+0x18+len, FCGI_PARAMS, id, 0x00 );
+	fcgi_set_header( fcgi_request+0x20+len, FCGI_STDIN, id, 0x00 );
+	len += 0x28;
+	res = write( sock_stream, fcgi_request, len );
 	
-	if ( len < 0 ) {
+	if ( res < 0 ) {
 		ast_debug( 1, "Failed to write: %s, reconnecting...\n", strerror( errno ) );
-		len = fcgi_connect( 1 );
-		if ( len < 0 ) {
+		res = fcgi_connect( 1 );
+		if ( res < 0 ) {
 			ast_log( AST_LOG_ERROR, "Failed to write: %s, giving up...\n", strerror( errno ) );
 		} else {
-			write( sock_stream, fcgi_packet, (int)( buf - fcgi_packet ) );
+			write( sock_stream, fcgi_request, len );
 		}
 	}
 	
-	len = read( sock_stream, fcgi_packet, FCGI_MSG_SZ );
-	ast_debug( 2, "EOR #%d, write: %d, read: %d\n", id, (int)( buf - fcgi_packet ), len );
+	res = read( sock_stream, fcgi_responce, FCGI_MSG_SZ );
+	ast_debug( 2, "EOR #%d, write: %d, read: %d\n", id, len, res );
 	
 	id++;
 	return 0;
 }
 
+/* partially filling up packet data
+
+xxxx xxxx | 0x00 header: dynamic, set each time in "fcgi_worker()"
+xxxx xxxx | 0x08 options: static, set once in "load_module()"
+xxxx xxxx | 0x10 data header: dynamic, set each time in "fcgi_worker()"
+xxxx xxxx | 0x18 data: set up "SCRIPT_FILENAME", "GATEWAY_INTERFACE", "REQUEST_METHOD", keep length in "initial_packet_len"
+...       | ... other data, set each time in "fcgi_worker()"
+xxxx xxxx | 0x18 + len + pad: FCGI_PARAMS header, set each time in "fcgi_worker()"
+xxxx xxxx | 0x20 + len + pad: FCGI_PARAMS header, set each time in "fcgi_worker()"
+
+*/
 
 static int load_module( void ) {
-	int res = 1;
-	struct ast_config *cfg;	
+	struct ast_config *cfg;
 	struct ast_flags cfg_flags = { 0 };
 	const char *tmp;
 	
 	memset( &sock_options, 0, sizeof( struct sockaddr_un ) );
 	memset( &fcgi_hook, 0, sizeof( struct manager_custom_hook ) );
 	cfg = ast_config_load( FCGI_CONFIG, cfg_flags );
+	initial_packet_len = 0;
 	
 	if ( cfg == NULL || cfg == CONFIG_STATUS_FILEINVALID ) {
 		ast_log( AST_LOG_ERROR, "Unable to load config: " FCGI_CONFIG "\n" );
 		return AST_MODULE_LOAD_DECLINE;
 	}
+	
+	fcgi_set_options( fcgi_request+0x08, FCGI_RESPONDER, 1 );
 	
 	sock_options.sun_family = AF_UNIX;
 	if ( ast_variable_browse( cfg, "global" ) ) {
@@ -237,23 +241,22 @@ static int load_module( void ) {
 		
 		tmp = ast_variable_retrieve( cfg, "global", "script" );
 		if ( tmp ) {
-			strcpy( script_name, tmp );
+			initial_packet_len += fcgi_keyval( fcgi_request+0x18+initial_packet_len, "SCRIPT_FILENAME", tmp );
 		} else {
 			ast_log( AST_LOG_NOTICE, "FCGI script not specified. Using default: " FCGI_SCRIPT "\n" );
-			strcpy( script_name, FCGI_SCRIPT );
+			initial_packet_len += fcgi_keyval( fcgi_request+0x18+initial_packet_len, "SCRIPT_FILENAME", FCGI_SCRIPT );
 		}
 	} else {
 		ast_log( AST_LOG_WARNING, "Global section not found, using defaults\n" );
 		strcpy( sock_options.sun_path, FCGI_SOCKET );
-		strcpy( script_name, FCGI_SCRIPT );
+		initial_packet_len += fcgi_keyval( fcgi_request+0x18+initial_packet_len, "SCRIPT_FILENAME", FCGI_SCRIPT );
 	}
 	ast_config_destroy( cfg );
 	
-	res = fcgi_connect( 0 );
-	if ( res < 0 ) {
-		return AST_MODULE_LOAD_FAILURE;
-	}
-
+	initial_packet_len += fcgi_keyval( fcgi_request+0x18+initial_packet_len, "GATEWAY_INTERFACE", "CGI/1.1" );
+	initial_packet_len += fcgi_keyval( fcgi_request+0x18+initial_packet_len, "REQUEST_METHOD", "GET" );
+	
+	fcgi_connect( 0 );
 	
 	fcgi_hook.helper = fcgi_worker;
 	
@@ -266,6 +269,7 @@ static int unload_module( void ) {
 
 	ast_manager_unregister_hook( &fcgi_hook );
 	shutdown( sock_stream, SHUT_RDWR );
+	read( sock_stream, fcgi_responce, FCGI_MSG_SZ );
 	close( sock_stream );
 	return 0;
 }
