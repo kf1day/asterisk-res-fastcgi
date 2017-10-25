@@ -1,0 +1,36 @@
+#!/bin/sh
+
+
+
+SRC=""
+LIB=""
+
+while [ ! -d "$SRC" ]; do
+ echo "Enter a path to asterisk SOURCES (/opt/asterisk-git):"
+ read SRC
+ if [ -z "$SRC" ]; then
+  SRC="/opt/asterisk-git"
+ fi
+done
+
+while [ ! -d "$LIB" ]; do
+ echo "Enter a path to asterisk MODULES (/usr/lib/asterisk/modules):"
+ read LIB
+ if [ -z "$LIB" ]; then
+  LIB="/usr/lib/asterisk/modules"
+ fi
+done
+
+printf "default: res_fastcgi.so
+
+install: res_fastcgi.so
+	cp res_fastcgi.so %s/
+
+clean:
+	rm -f res_fastcgi.so res_fastcgi-dbg.so
+
+res_fastcgi.so: res_fastcgi.c
+	gcc -g -Wall -shared -o res_fastcgi-dbg.so -fPIC res_fastcgi.c -I%s/include
+	cp res_fastcgi-dbg.so res_fastcgi.so
+	strip res_fastcgi.so
+" "$LIB" "$SRC" > Makefile

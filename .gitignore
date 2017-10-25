@@ -1,2 +1,3 @@
 /res_fastcgi.so
-/res_fastcgi.so.strip
+/res_fastcgi-dbg.so
+/Makefile
