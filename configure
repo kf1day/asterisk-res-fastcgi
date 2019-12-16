@@ -2,35 +2,40 @@
 
 
 
+SRCDEF="/opt/buildd/asterisk"
+LIBDEF="/usr/lib/asterisk/modules"
+
 SRC=""
 LIB=""
 
 while [ ! -d "$SRC" ]; do
- echo "Enter a path to asterisk SOURCES (/opt/asterisk-git):"
+ echo "Enter a path to asterisk SOURCES directory ($SRCDEF):"
  read SRC
  if [ -z "$SRC" ]; then
-  SRC="/opt/asterisk-git"
+  SRC="$SRCDEF"
  fi
 done
 
 while [ ! -d "$LIB" ]; do
- echo "Enter a path to asterisk MODULES (/usr/lib/asterisk/modules):"
+ echo "Enter a path to asterisk MODULES directory ($LIBDEF):"
  read LIB
  if [ -z "$LIB" ]; then
-  LIB="/usr/lib/asterisk/modules"
+  LIB="$LIBDEF"
  fi
 done
 
-printf "default: res_fastcgi.so
+cat > Makefile << EOF
+default: res_fastcgi.so
 
 install: res_fastcgi.so
-	cp res_fastcgi.so %s/
+	cp res_fastcgi.so ${LIB}/
+	cp res_fastcgi.conf /etc/asterisk/
 
 clean:
 	rm -f res_fastcgi.so res_fastcgi-dbg.so
 
 res_fastcgi.so: res_fastcgi.c
-	gcc -g -Wall -shared -o res_fastcgi-dbg.so -fPIC res_fastcgi.c -I%s/include
+	gcc -g -Wall -shared -o res_fastcgi-dbg.so -fPIC res_fastcgi.c -I${SRC}/include
 	cp res_fastcgi-dbg.so res_fastcgi.so
 	strip res_fastcgi.so
-" "$LIB" "$SRC" > Makefile
+EOF

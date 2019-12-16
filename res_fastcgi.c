@@ -1,19 +1,17 @@
 #include <string.h>
 #include <sys/un.h>
-#include "asterisk.h"
+
 
 #define AST_MODULE "res_fastcgi"
+#define AST_MODULE_SELF_SYM res_fastagi
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
+
+#include "asterisk.h"
 
 #include "asterisk/config.h"
 #include "asterisk/module.h"
 #include "asterisk/logger.h"
 #include "asterisk/manager.h"
-
-
-//AST_MUTEX_DEFINE_STATIC(fcgi_lock);
-
 
 #define FCGI_MSG_SZ 0x4000
 
@@ -54,14 +52,14 @@ typedef enum {
 static uint8_t fcgi_set_header( char *msg, FCGI_TYPE type, int req_id, int len ) {
 	uint8_t pad = ( 8 - ( len % 8 ) ) % 8;
 
-	*msg++	= 1;									//version
-	*msg++	= (uint8_t) type;					//type
+	*msg++	= 1;							//version
+	*msg++	= (uint8_t) type;				//type
 	*msg++	= (uint8_t) _B1( req_id );		//request ID B1
 	*msg++	= (uint8_t) _B0( req_id );		//request ID B0
 	*msg++	= (uint8_t) _B1( len );			//content length B1
 	*msg++	= (uint8_t) _B0( len );			//content length B0
-	*msg++	= pad;									//padding length
-	*msg++	= 0;									//reserved
+	*msg++	= pad;							//padding length
+	*msg++	= 0;							//reserved
 
 	return pad;
 }
@@ -86,8 +84,6 @@ static int fcgi_keyval( char *msg, const char *key, const char *val ) {
 	
 	klen = strlen( key );
 	vlen = strlen( val );
-
-//	assert( klen >= 0 && vlen >= 0 );
 	
 	if ( klen < 0x80 ) {
 		*msg++ = (uint8_t) _B0( klen );
@@ -124,8 +120,8 @@ static int fcgi_keyval( char *msg, const char *key, const char *val ) {
 
 
 static int sock_stream, initial_packet_len;
-static struct sockaddr_un sock_options;
-static struct manager_custom_hook fcgi_hook;
+static struct sockaddr_un sock_options = { 0 };
+static struct manager_custom_hook fcgi_hook = { 0 };
 static char fcgi_request[FCGI_MSG_SZ], fcgi_responce[FCGI_MSG_SZ];
 
 
@@ -217,8 +213,8 @@ static int load_module( void ) {
 	struct ast_flags cfg_flags = { 0 };
 	const char *tmp;
 	
-	memset( &sock_options, 0, sizeof( struct sockaddr_un ) );
-	memset( &fcgi_hook, 0, sizeof( struct manager_custom_hook ) );
+//	memset( &sock_options, 0, sizeof( struct sockaddr_un ) );
+//	memset( &fcgi_hook, 0, sizeof( struct manager_custom_hook ) );
 	cfg = ast_config_load( FCGI_CONFIG, cfg_flags );
 	initial_packet_len = 0;
 	
