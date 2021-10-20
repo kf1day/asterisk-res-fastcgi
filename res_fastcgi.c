@@ -50,7 +50,7 @@ typedef enum {
 
 
 static uint8_t fcgi_set_header( char *msg, FCGI_TYPE type, int req_id, int len ) {
-	uint8_t pad = ( 8 - ( len % 8 ) ) % 8;
+	uint8_t pad = ~( len - 1 ) & 7;
 
 	*msg++	= 1;							//version
 	*msg++	= (uint8_t) type;				//type
