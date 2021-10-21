@@ -13,7 +13,7 @@
 #include "asterisk/logger.h"
 #include "asterisk/manager.h"
 
-#define FCGI_BUFFER_SIZE 0x1000
+#define FCGI_BUFFER_SIZE 0x2000
 #define FCGI_SCRIPT_SIZE 0x0100
 
 #define FCGI_CONFIG AST_MODULE".conf"
@@ -245,7 +245,13 @@ static int load_module( void ) {
 static int unload_module( void ) {
 
 	ast_manager_unregister_hook( &fcgi_hook );
-	read( sock_stream, buffer, FCGI_BUFFER_SIZE );
+	fcgi_set_header( buffer+0x00, FCGI_BEGIN, 0, 0x08 );
+	fcgi_set_options( buffer+0x08, FCGI_RESPONDER, 0 );
+	fcgi_set_header( buffer+0x10, FCGI_ABORT, 0, 0x08 );
+	write( sock_stream, buffer, 0x18 );
+	do {
+		res = read( sock_stream, buffer, FCGI_BUFFER_SIZE );
+	} while ( res == FCGI_BUFFER_SIZE );
 	shutdown( sock_stream, SHUT_RDWR );
 	close( sock_stream );
 	return 0;
