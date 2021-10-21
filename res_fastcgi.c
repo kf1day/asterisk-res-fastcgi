@@ -53,7 +53,7 @@ typedef enum {
 static int sock_stream, res;
 static struct sockaddr_un sock_options = { 0 };
 static struct manager_custom_hook fcgi_hook = { 0 };
-static char buffer[FCGI_BUFFER_SIZE], script_filename[FCGI_SCRIPT_SIZE];
+static char buffer[FCGI_BUFFER_SIZE], script_filename[FCGI_SCRIPT_SIZE] = FCGI_SCRIPT;
 
 
 static uint8_t fcgi_set_header( char *buf, FCGI_TYPE type, int req_id, int len ) {
@@ -77,41 +77,44 @@ static void fcgi_set_options( char *buf, FCGI_ROLE role, uint8_t keepalive ) {
 	*buf++	= (uint8_t) _B0( role );		//roleB0
 	*buf++	= ( ( keepalive ) ? 1 : 0 );	//flags
 	memset( buf, 0, 5 );
-	buf += 5;
 }
 
-static char* fcgi_keyval( char *buf, const char *key, const char *val ) {
+static uint16_t fcgi_keyval( char *buf, const char *key, const char *val ) {
 	
-	int klen, vlen = 0;
+	uint16_t klen, vlen;
+	res = 0;
+
 	
 	klen = strlen( key );
 	vlen = strlen( val );
 	
 	if ( klen >> 7 ) {
 		*buf++ = (uint8_t) _B0( klen );
+		res += 1;
 	} else {
 		*buf++ = (uint8_t) _B3( klen );
 		*buf++ = (uint8_t) _B2( klen );
 		*buf++ = (uint8_t) _B1( klen );
 		*buf++ = (uint8_t) _B0( klen );
+		res += 4;
 	}
 
 	if ( vlen >> 7 ) {
 		*buf++ = (uint8_t) _B0( vlen );
+		res += 1;
 	} else {
 		*buf++ = (uint8_t) _B3( vlen );
 		*buf++ = (uint8_t) _B2( vlen );
 		*buf++ = (uint8_t) _B1( vlen );
 		*buf++ = (uint8_t) _B0( vlen );
+		res += 4;
 	}
 	
 	memcpy( buf, key, klen );
 	buf += klen;
-	
 	memcpy( buf, val, vlen );
-	buf += vlen;
 
-	return buf;
+	return res + klen + vlen;
 }
 
 static int fcgi_connect( char reconnect ) {
@@ -135,38 +138,45 @@ static int fcgi_connect( char reconnect ) {
 }
 
 static int fcgi_worker( int category, const char *event, char *body ) {
-	static int id = 1;
-	char *buf, *pos, *end;
+	static uint32_t id = 0;
+	uint16_t len;
+	char *pos, *end;
+
+	len = 0;
+
+	id++;
 
 	fcgi_set_header( buffer+0x00, FCGI_BEGIN, id, 0x08 );
 	fcgi_set_options( buffer+0x08, FCGI_RESPONDER, 1 );
-	buf = buffer+0x18; // skip bytes for future FCGI_PARAMS header
-	buf = fcgi_keyval( buf, "SCRIPT_FILENAME", script_filename );
-	//buf = fcgi_keyval( buf, "GATEWAY_INTERFACE", "CGI/1.1" );
-	buf = fcgi_keyval( buf, "REQUEST_METHOD", "GET" );
+	// skip bytes for future FCGI_PARAMS header
+	len += fcgi_keyval( buffer+0x18+len, "SCRIPT_FILENAME", script_filename );
+	len += fcgi_keyval( buffer+0x18+len, "REQUEST_METHOD", "GET" );
 
 	pos = strstr( body, ": " );
-	while( pos ) {
+	while( pos && len + 0x28 < FCGI_BUFFER_SIZE ) {
 		*pos = 0;
 		end = strstr( pos+2, "\r\n" );
-		*end = 0; // #TODO check if null
+		if ( end == NULL ) break;
+		*end = 0;
 		
-		buf = fcgi_keyval( buf, body, pos+2 );
+		len += fcgi_keyval( buffer+0x18+len, body, pos+2 );
 		body = end+2;
 		
 		pos = strstr( body, ": " );
 	}
 
-	res = fcgi_set_header( buffer+0x10, FCGI_PARAMS, id, (uint16_t)( buf - buffer ) - 0x18 );
+	res = fcgi_set_header( buffer+0x10, FCGI_PARAMS, id, len );
 
 	for( ; res > 0; res-- ) {
-		*buf++ = 0;
+		*(buffer+0x18+len) = 0;
+		len++;
 	}
-	fcgi_set_header( buf+0x00, FCGI_PARAMS, id, 0x00 );
-	fcgi_set_header( buf+0x08, FCGI_STDIN, id, 0x00 );
-	buf += 0x10; // add trailing headers to offset buffer
+	//fcgi_set_header( buffer+0x18+len, FCGI_PARAMS, id, 0x00 );
+	//fcgi_set_header( buffer+0x20+len, FCGI_STDIN, id, 0x00 );
+	fcgi_set_header( buffer+0x18+len, FCGI_END, id, 0x00 );
+	len += 0x20; // including bytes of heading and trailing headers
 
-	res = write( sock_stream, buffer, (uint16_t)( buf - buffer ) );
+	res = write( sock_stream, buffer, len );
 
 	if ( res < 0 ) {
 		ast_debug( 1, "Failed to write: %s, reconnecting...\n", strerror( errno ) );
@@ -174,16 +184,15 @@ static int fcgi_worker( int category, const char *event, char *body ) {
 		if ( res < 0 ) {
 			ast_log( AST_LOG_ERROR, "Failed to write: %s, giving up...\n", strerror( errno ) );
 		} else {
-			write( sock_stream, buffer, (uint16_t)( buf - buffer ) );
+			write( sock_stream, buffer, len );
 		}
 	}
 
 	do {
 		res = read( sock_stream, buffer, FCGI_BUFFER_SIZE );
 	} while ( res == FCGI_BUFFER_SIZE );
-	ast_debug( 2, "EOR #%d, write: %d, read: %d\n", id, (uint16_t)( buf - buffer ), res );
+	ast_debug( 2, "EOR #%d, write: %d, read: %d\n", id, len, res );
 
-	id++;
 	return 0;
 }
 
@@ -212,15 +221,17 @@ static int load_module( void ) {
 
 		tmp = ast_variable_retrieve( cfg, "global", "script" );
 		if ( tmp ) {
-			strcpy( script_filename, tmp );
+			if ( strlen( tmp ) < FCGI_SCRIPT_SIZE ) {
+				strcpy( script_filename, tmp );
+			} else {
+				ast_log( AST_LOG_WARNING, "FCGI script path is too long. Using default: " FCGI_SCRIPT "\n" );
+			}
 		} else {
 			ast_log( AST_LOG_NOTICE, "FCGI script not specified. Using default: " FCGI_SCRIPT "\n" );
-			strcpy( script_filename, FCGI_SCRIPT );
 		}
 	} else {
 		ast_log( AST_LOG_WARNING, "Global section not found, using defaults\n" );
 		strcpy( sock_options.sun_path, FCGI_SOCKET );
-		strcpy( script_filename, FCGI_SCRIPT );
 	}
 	ast_config_destroy( cfg );
 
@@ -235,8 +246,8 @@ static int load_module( void ) {
 static int unload_module( void ) {
 
 	ast_manager_unregister_hook( &fcgi_hook );
-	shutdown( sock_stream, SHUT_RDWR );
 	read( sock_stream, buffer, FCGI_BUFFER_SIZE );
+	shutdown( sock_stream, SHUT_RDWR );
 	close( sock_stream );
 	return 0;
 }
