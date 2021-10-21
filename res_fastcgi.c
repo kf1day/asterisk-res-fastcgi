@@ -71,43 +71,43 @@ static uint8_t fcgi_set_header( char *buf, FCGI_TYPE type, int req_id, int len )
 	return pad;
 }
 
-static void fcgi_set_options( char *buf, FCGI_ROLE role, uint8_t keepalive ) {
+static void fcgi_set_options( char *buf, FCGI_ROLE role, _Bool keepalive ) {
 
-	*buf++	= (uint8_t) _B1( role );		//roleB1
-	*buf++	= (uint8_t) _B0( role );		//roleB0
-	*buf++	= ( ( keepalive ) ? 1 : 0 );	//flags
+	*buf++	= (uint8_t) _B1( role );		// roleB1
+	*buf++	= (uint8_t) _B0( role );		// roleB0
+	*buf++	= keepalive;					// keep-alive flag
 	memset( buf, 0, 5 );
 }
 
 static uint16_t fcgi_keyval( char *buf, const char *key, const char *val ) {
 	
-	uint16_t klen, vlen;
-	res = 0;
-
+	uint32_t klen, vlen;
 	
 	klen = strlen( key );
 	vlen = strlen( val );
+
+	res = 0;
 	
 	if ( klen >> 7 ) {
-		*buf++ = (uint8_t) _B0( klen );
-		res += 1;
-	} else {
 		*buf++ = (uint8_t) _B3( klen );
 		*buf++ = (uint8_t) _B2( klen );
 		*buf++ = (uint8_t) _B1( klen );
 		*buf++ = (uint8_t) _B0( klen );
 		res += 4;
+	} else {
+		*buf++ = (uint8_t) _B0( klen );
+		res += 1;
 	}
 
 	if ( vlen >> 7 ) {
-		*buf++ = (uint8_t) _B0( vlen );
-		res += 1;
-	} else {
 		*buf++ = (uint8_t) _B3( vlen );
 		*buf++ = (uint8_t) _B2( vlen );
 		*buf++ = (uint8_t) _B1( vlen );
 		*buf++ = (uint8_t) _B0( vlen );
 		res += 4;
+	} else {
+		*buf++ = (uint8_t) _B0( vlen );
+		res += 1;
 	}
 	
 	memcpy( buf, key, klen );
@@ -171,10 +171,9 @@ static int fcgi_worker( int category, const char *event, char *body ) {
 		*(buffer+0x18+len) = 0;
 		len++;
 	}
-	//fcgi_set_header( buffer+0x18+len, FCGI_PARAMS, id, 0x00 );
-	//fcgi_set_header( buffer+0x20+len, FCGI_STDIN, id, 0x00 );
-	fcgi_set_header( buffer+0x18+len, FCGI_END, id, 0x00 );
-	len += 0x20; // including bytes of heading and trailing headers
+	fcgi_set_header( buffer+0x18+len, FCGI_PARAMS, id, 0x00 );
+	fcgi_set_header( buffer+0x20+len, FCGI_STDIN, id, 0x00 );
+	len += 0x28; // including bytes of heading and trailing headers
 
 	res = write( sock_stream, buffer, len );
 
