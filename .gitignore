@@ -1,3 +1,4 @@
+/.vscode
 /res_fastcgi.so
 /res_fastcgi-dbg.so
 /Makefile

@@ -1,6 +1,16 @@
 #include <string.h>
 #include <sys/un.h>
 
+#ifndef KEEPALIVE
+#define KEEPALIVE 0
+#endif
+
+#if KEEPALIVE
+#define PACKET_ID id
+#else
+#define PACKET_ID 1
+#endif
+
 
 #define AST_MODULE "res_fastcgi"
 #define AST_MODULE_SELF_SYM res_fastagi
@@ -122,8 +132,8 @@ static int fcgi_keyval( char *buf, const char *key, const char *val ) {
 static int fcgi_connect( char reconnect ) {
 
 	if ( reconnect && sock_stream ) {
-		shutdown( sock_stream, SHUT_RDWR );
 		read( sock_stream, buffer, FCGI_BUFFER_SIZE );
+		shutdown( sock_stream, SHUT_RDWR );
 		close( sock_stream );
 	}
 	sock_stream = socket( AF_UNIX, SOCK_STREAM, 0 );
@@ -140,16 +150,18 @@ static int fcgi_connect( char reconnect ) {
 }
 
 static int fcgi_worker( int category, const char *event, char *body ) {
+	#if KEEPALIVE
 	static uint32_t id = 0;
+	id++;
+	#endif
 	uint16_t len;
 	char *pos, *end;
 
 	len = 0;
 
-	id++;
 
-	fcgi_set_header( buffer+0x00, FCGI_BEGIN, id, 0x08 );
-	fcgi_set_options( buffer+0x08, FCGI_RESPONDER, 1 );
+	fcgi_set_header( buffer+0x00, FCGI_BEGIN, PACKET_ID, 0x08 );
+	fcgi_set_options( buffer+0x08, FCGI_RESPONDER, KEEPALIVE );
 	// skip bytes for future FCGI_PARAMS header
 	len += fcgi_keyval( buffer+0x18+len, "SCRIPT_FILENAME", script_filename );
 	len += fcgi_keyval( buffer+0x18+len, "REQUEST_METHOD", "GET" );
@@ -167,32 +179,43 @@ static int fcgi_worker( int category, const char *event, char *body ) {
 		pos = strstr( body, ": " );
 	}
 
-	res = fcgi_set_header( buffer+0x10, FCGI_PARAMS, id, len );
+	res = fcgi_set_header( buffer+0x10, FCGI_PARAMS, PACKET_ID, len );
 
 	for( ; res > 0; res-- ) {
 		*(buffer+0x18+len) = 0;
 		len++;
 	}
-	fcgi_set_header( buffer+0x18+len, FCGI_PARAMS, id, 0x00 );
-	fcgi_set_header( buffer+0x20+len, FCGI_STDIN, id, 0x00 );
+	fcgi_set_header( buffer+0x18+len, FCGI_PARAMS, PACKET_ID, 0x00 );
+	fcgi_set_header( buffer+0x20+len, FCGI_STDIN, PACKET_ID, 0x00 );
 	len += 0x28; // including bytes of heading and trailing headers
 
+	#if KEEPALIVE
 	res = write( sock_stream, buffer, len );
-
 	if ( res < 0 ) {
 		ast_debug( 1, "Failed to write: %s, reconnecting...\n", strerror( errno ) );
-		res = fcgi_connect( 1 );
-		if ( res < 0 ) {
-			ast_log( AST_LOG_ERROR, "Failed to write: %s, giving up...\n", strerror( errno ) );
-		} else {
-			write( sock_stream, buffer, len );
-		}
+		fcgi_connect( 1 );
+		res = write( sock_stream, buffer, len );
 	}
-
-	do {
-		res = read( sock_stream, buffer, FCGI_BUFFER_SIZE );
-	} while ( res == FCGI_BUFFER_SIZE );
-	ast_debug( 2, "EOR #%d, write: %d, read: %d\n", id, len, res );
+	#else
+	fcgi_connect( 0 );
+	res = write( sock_stream, buffer, len );
+	#endif
+	ast_debug( 2, "EOR #%d, send: %d\n", PACKET_ID, res );
+	if ( res < 0 ) {
+		ast_log( AST_LOG_ERROR, "Failed to write: %s\n", strerror( errno ) );
+	} else {
+		res = 0;
+		do {
+			len = read( sock_stream, buffer, FCGI_BUFFER_SIZE );
+			res += len;
+		} while ( len == FCGI_BUFFER_SIZE );
+	}
+	#if KEEPALIVE
+	#else
+	shutdown( sock_stream, SHUT_RDWR );
+	close( sock_stream );
+	#endif
+	ast_debug( 2, "EOR #%d, recv: %d\n", PACKET_ID, res );
 
 	return 0;
 }
@@ -236,7 +259,9 @@ static int load_module( void ) {
 	}
 	ast_config_destroy( cfg );
 
+	#if KEEPALIVE
 	fcgi_connect( 0 );
+	#endif
 
 	fcgi_hook.helper = fcgi_worker;
 
@@ -247,6 +272,7 @@ static int load_module( void ) {
 static int unload_module( void ) {
 
 	ast_manager_unregister_hook( &fcgi_hook );
+	#if KEEPALIVE
 	fcgi_set_header( buffer+0x00, FCGI_BEGIN, 0, 0x08 );
 	fcgi_set_options( buffer+0x08, FCGI_RESPONDER, 0 );
 	fcgi_set_header( buffer+0x10, FCGI_ABORT, 0, 0x08 );
@@ -256,6 +282,7 @@ static int unload_module( void ) {
 	} while ( res == FCGI_BUFFER_SIZE );
 	shutdown( sock_stream, SHUT_RDWR );
 	close( sock_stream );
+	#endif
 	return 0;
 }
 
