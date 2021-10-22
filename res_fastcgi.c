@@ -79,12 +79,14 @@ static void fcgi_set_options( char *buf, FCGI_ROLE role, _Bool keepalive ) {
 	memset( buf, 0, 5 );
 }
 
-static uint16_t fcgi_keyval( char *buf, const char *key, const char *val ) {
+static int fcgi_keyval( char *buf, const char *key, const char *val ) {
 	
-	uint32_t klen, vlen;
+	int klen, vlen;
 	
 	klen = strlen( key );
 	vlen = strlen( val );
+
+	if ( klen < 0 || vlen < 0 ) return 0;
 
 	res = 0;
 	
@@ -153,7 +155,7 @@ static int fcgi_worker( int category, const char *event, char *body ) {
 	len += fcgi_keyval( buffer+0x18+len, "REQUEST_METHOD", "GET" );
 
 	pos = strstr( body, ": " );
-	while( pos && len + 0x28 < FCGI_BUFFER_SIZE ) {
+	while( pos && ( len + 0x28 < FCGI_BUFFER_SIZE ) ) {
 		*pos = 0;
 		end = strstr( pos+2, "\r\n" );
 		if ( end == NULL ) break;
