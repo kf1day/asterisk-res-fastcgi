@@ -2,7 +2,7 @@
 #include <sys/un.h>
 
 #ifndef KEEPALIVE
-#define KEEPALIVE 0
+#define KEEPALIVE 1
 #endif
 
 #if KEEPALIVE
@@ -66,19 +66,27 @@ static struct manager_custom_hook fcgi_hook = { 0 };
 static char buffer[FCGI_BUFFER_SIZE], script_filename[FCGI_SCRIPT_SIZE] = FCGI_SCRIPT;
 
 
-static uint8_t fcgi_set_header( char *buf, FCGI_TYPE type, int req_id, int len ) {
+static uint8_t fcgi_set_header( char *buf, FCGI_TYPE type, uint16_t req_id, uint16_t len ) {
 	uint8_t pad = ~( len - 1 ) & 7;
 
-	*buf++	= 1;							//version
-	*buf++	= (uint8_t) type;				//type
-	*buf++	= (uint8_t) _B1( req_id );		//request ID B1
-	*buf++	= (uint8_t) _B0( req_id );		//request ID B0
-	*buf++	= (uint8_t) _B1( len );			//content length B1
-	*buf++	= (uint8_t) _B0( len );			//content length B0
-	*buf++	= pad;							//padding length
-	*buf++	= 0;							//reserved
+	buf[0] = 1;					//version
+	buf[1] = type;				//type
+	buf[2] = _B1( req_id );		//request ID B1
+	buf[3] = _B0( req_id );		//request ID B0
+	buf[4] = _B1( len );		//content length B1
+	buf[5] = _B0( len );		//content length B0
+	buf[6] = pad;				//padding length
+	buf[7]	= 0;				//reserved
 
 	return pad;
+}
+
+static void fcgi_get_header( char *buf, char **type, int *req_id, uint16_t *len, char **padding ) {
+
+	*type = buf+1;
+	*req_id = ( buf[2] << 8 ) | buf[3];
+	*len = buf[4] << 8 | buf[5];
+	*padding = buf+6;
 }
 
 static void fcgi_set_options( char *buf, FCGI_ROLE role, _Bool keepalive ) {
@@ -89,7 +97,7 @@ static void fcgi_set_options( char *buf, FCGI_ROLE role, _Bool keepalive ) {
 	memset( buf, 0, 5 );
 }
 
-static int fcgi_keyval( char *buf, const char *key, const char *val ) {
+static int fcgi_set_keyval( char *buf, const char *key, const char *val ) {
 	
 	int klen, vlen;
 	
@@ -151,20 +159,22 @@ static int fcgi_connect( char reconnect ) {
 
 static int fcgi_worker( int category, const char *event, char *body ) {
 	#if KEEPALIVE
-	static uint32_t id = 0;
-	id++;
+	static uint16_t id = 0;
 	#endif
 	uint16_t len;
 	char *pos, *end;
 
 	len = 0;
 
+	#if KEEPALIVE
+	id++;
+	#endif
 
 	fcgi_set_header( buffer+0x00, FCGI_BEGIN, PACKET_ID, 0x08 );
 	fcgi_set_options( buffer+0x08, FCGI_RESPONDER, KEEPALIVE );
-	// skip bytes for future FCGI_PARAMS header
-	len += fcgi_keyval( buffer+0x18+len, "SCRIPT_FILENAME", script_filename );
-	len += fcgi_keyval( buffer+0x18+len, "REQUEST_METHOD", "GET" );
+	// skip bytes for further FCGI_PARAMS header here
+	len += fcgi_set_keyval( buffer+0x18+len, "SCRIPT_FILENAME", script_filename );
+	len += fcgi_set_keyval( buffer+0x18+len, "REQUEST_METHOD", "GET" );
 
 	pos = strstr( body, ": " );
 	while( pos && ( len + 0x28 < FCGI_BUFFER_SIZE ) ) {
@@ -173,7 +183,7 @@ static int fcgi_worker( int category, const char *event, char *body ) {
 		if ( end == NULL ) break;
 		*end = 0;
 		
-		len += fcgi_keyval( buffer+0x18+len, body, pos+2 );
+		len += fcgi_set_keyval( buffer+0x18+len, body, pos+2 );
 		body = end+2;
 		
 		pos = strstr( body, ": " );
@@ -182,7 +192,7 @@ static int fcgi_worker( int category, const char *event, char *body ) {
 	res = fcgi_set_header( buffer+0x10, FCGI_PARAMS, PACKET_ID, len );
 
 	for( ; res > 0; res-- ) {
-		*(buffer+0x18+len) = 0;
+		buffer[0x18+len] = 0;
 		len++;
 	}
 	fcgi_set_header( buffer+0x18+len, FCGI_PARAMS, PACKET_ID, 0x00 );
@@ -209,13 +219,24 @@ static int fcgi_worker( int category, const char *event, char *body ) {
 			len = read( sock_stream, buffer, FCGI_BUFFER_SIZE );
 			res += len;
 		} while ( len == FCGI_BUFFER_SIZE );
+
+		ast_debug( 2, "EOR #%d, recv: %d\n", PACKET_ID, res );
+		if ( res >  FCGI_BUFFER_SIZE ) {
+			ast_log( AST_LOG_NOTICE, "FCGI result too long\n" );
+		} else {
+			fcgi_get_header( buffer, &pos, &res, &len, &end );
+			if ( *pos == FCGI_STDOUT && res == PACKET_ID ) {
+				buffer[0x08+len] = 0;
+				ast_debug( 3, "%s\n", buffer + 0x08 );
+			}
+		}
+
 	}
 	#if KEEPALIVE
 	#else
 	shutdown( sock_stream, SHUT_RDWR );
 	close( sock_stream );
 	#endif
-	ast_debug( 2, "EOR #%d, recv: %d\n", PACKET_ID, res );
 
 	return 0;
 }
@@ -273,6 +294,7 @@ static int unload_module( void ) {
 
 	ast_manager_unregister_hook( &fcgi_hook );
 	#if KEEPALIVE
+	/*
 	fcgi_set_header( buffer+0x00, FCGI_BEGIN, 0, 0x08 );
 	fcgi_set_options( buffer+0x08, FCGI_RESPONDER, 0 );
 	fcgi_set_header( buffer+0x10, FCGI_ABORT, 0, 0x08 );
@@ -281,6 +303,7 @@ static int unload_module( void ) {
 		res = read( sock_stream, buffer, FCGI_BUFFER_SIZE );
 	} while ( res == FCGI_BUFFER_SIZE );
 	shutdown( sock_stream, SHUT_RDWR );
+	*/
 	close( sock_stream );
 	#endif
 	return 0;
