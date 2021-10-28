@@ -144,7 +144,7 @@ static int fcgi_connect( char reconnect ) {
 		shutdown( sock_stream, SHUT_RDWR );
 		close( sock_stream );
 	}
-	sock_stream = socket( AF_UNIX, SOCK_STREAM, 0 );
+	sock_stream = ast_socket_nonblock( AF_UNIX, SOCK_STREAM, 0 );
 	if ( !sock_stream ) {
 		ast_log( AST_LOG_ERROR, "Unable to create socket: %s\n", strerror( errno ) );
 		return -1;
@@ -214,16 +214,19 @@ static int fcgi_worker( int category, const char *event, char *body ) {
 	if ( res < 0 ) {
 		ast_log( AST_LOG_ERROR, "Failed to write: %s\n", strerror( errno ) );
 	} else {
-		res = 0;
+		len = 0;
 		do {
-			len = read( sock_stream, buffer, FCGI_BUFFER_SIZE );
-			res += len;
-		} while ( len == FCGI_BUFFER_SIZE );
+			usleep( 10 );
+			res = read( sock_stream, buffer, FCGI_BUFFER_SIZE );
+			if ( res >= 0 ) {
+				len += res;
+			}
+		} while ( res == FCGI_BUFFER_SIZE );
 
-		ast_debug( 2, "EOR #%d, recv: %d\n", PACKET_ID, res );
-		if ( res >  FCGI_BUFFER_SIZE ) {
+		ast_debug( 2, "EOR #%d, recv: %d\n", PACKET_ID, len );
+		if ( len >  FCGI_BUFFER_SIZE ) {
 			ast_log( AST_LOG_NOTICE, "FCGI result too long\n" );
-		} else {
+		} else if ( len > 0 ) {
 			fcgi_get_header( buffer, &pos, &res, &len, &end );
 			if ( *pos == FCGI_STDOUT && res == PACKET_ID ) {
 				buffer[0x08+len] = 0;
