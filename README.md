@@ -6,13 +6,43 @@ A small module which provides AMI messages directly to FastCGI server, such as P
 
 ## Comparbility
 
-Tested on Asterisk 13.13 and 16.4
+Tested on Asterisk 13.13, 16.4 and 18.4
 
 ## Compilation
 
 Usual boring sequence:
 
 `./configure && make && make install`
+
+
+## Data transfer
+Module sends data to script through environment variables, and doesn`t care what data receives back. 
+
+Here is an example data of single script shot:
+```php
+
+$_SERVER = Array (
+    'USER' => 'asterisk',
+    'HOME' => '/var/lib/asterisk',
+    'RemoteAddress' => 'IPV4/UDP/1.2.3.4/60243',
+    'LocalAddress' => 'IPV4/UDP/5.6.7.8/5060',
+    'SessionID' => '485334176-1794503427-955328712',
+    'AccountID' => 1234,
+    'EventVersion' => 1,
+    'Service' => 'PJSIP',
+    'Severity' => 'Error',
+    'EventTV' => '2020-01-01T01:02:04.735+0000',
+    'Privilege' => 'security,all',
+    'Event' => 'InvalidAccountID',
+    'REQUEST_METHOD' => 'GET',
+    'SCRIPT_FILENAME' => '/var/lib/asterisk/manager.php',
+    'FCGI_ROLE' => 'RESPONDER',
+    'PHP_SELF' => '',
+    'REQUEST_TIME_FLOAT' => 1600001234.7358,
+    'REQUEST_TIME' => 1600001234
+);
+```
+
 
 
 ## Sample configuration with PHP-FPM
