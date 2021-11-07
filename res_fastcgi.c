@@ -1,6 +1,16 @@
 #include <string.h>
 #include <sys/un.h>
 
+#ifndef KEEPALIVE
+#define KEEPALIVE 1
+#endif
+
+#if KEEPALIVE
+#define PACKET_ID id
+#else
+#define PACKET_ID 1
+#endif
+
 
 #define AST_MODULE "res_fastcgi"
 #define AST_MODULE_SELF_SYM res_fastagi
@@ -13,7 +23,8 @@
 #include "asterisk/logger.h"
 #include "asterisk/manager.h"
 
-#define FCGI_MSG_SZ 0x4000
+#define FCGI_BUFFER_SIZE 0x2000
+#define FCGI_SCRIPT_SIZE 0x0100
 
 #define FCGI_CONFIG AST_MODULE".conf"
 #define FCGI_SOCKET "/var/run/asterisk/php-fpm.sock"
@@ -49,91 +60,91 @@ typedef enum {
 #define _B3( C ) ( ( C >> 24 ) | 0x80 )
 
 
-static uint8_t fcgi_set_header( char *msg, FCGI_TYPE type, int req_id, int len ) {
-	uint8_t pad = ( 8 - ( len % 8 ) ) % 8;
+static int sock_stream, res;
+static struct sockaddr_un sock_options = { 0 };
+static struct manager_custom_hook fcgi_hook = { 0 };
+static char buffer[FCGI_BUFFER_SIZE], script_filename[FCGI_SCRIPT_SIZE] = FCGI_SCRIPT;
 
-	*msg++	= 1;							//version
-	*msg++	= (uint8_t) type;				//type
-	*msg++	= (uint8_t) _B1( req_id );		//request ID B1
-	*msg++	= (uint8_t) _B0( req_id );		//request ID B0
-	*msg++	= (uint8_t) _B1( len );			//content length B1
-	*msg++	= (uint8_t) _B0( len );			//content length B0
-	*msg++	= pad;							//padding length
-	*msg++	= 0;							//reserved
+
+static uint8_t fcgi_set_header( char *buf, FCGI_TYPE type, uint16_t req_id, uint16_t len ) {
+	uint8_t pad = ~( len - 1 ) & 7;
+
+	buf[0] = 1;					//version
+	buf[1] = type;				//type
+	buf[2] = _B1( req_id );		//request ID B1
+	buf[3] = _B0( req_id );		//request ID B0
+	buf[4] = _B1( len );		//content length B1
+	buf[5] = _B0( len );		//content length B0
+	buf[6] = pad;				//padding length
+	buf[7]	= 0;				//reserved
 
 	return pad;
 }
 
-static void fcgi_set_options( char *msg, FCGI_ROLE role, uint8_t keepalive ) {
+static void fcgi_get_header( char *buf, char **type, int *req_id, uint16_t *len, char **padding ) {
 
-	*msg++	= (uint8_t) _B1( role );		//roleB1
-	*msg++	= (uint8_t) _B0( role );		//roleB0
-	*msg++	= ( ( keepalive ) ? 1 : 0 );	//flags
-	*msg++	= 0;
-	*msg++	= 0;
-	*msg++	= 0;
-	*msg++	= 0;
-	*msg++	= 0;
-
-
+	*type = buf+1;
+	*req_id = ( buf[2] << 8 ) | buf[3];
+	*len = buf[4] << 8 | buf[5];
+	*padding = buf+6;
 }
 
-static int fcgi_keyval( char *msg, const char *key, const char *val ) {
+static void fcgi_set_options( char *buf, FCGI_ROLE role, _Bool keepalive ) {
+
+	*buf++	= (uint8_t) _B1( role );		// roleB1
+	*buf++	= (uint8_t) _B0( role );		// roleB0
+	*buf++	= keepalive;					// keep-alive flag
+	memset( buf, 0, 5 );
+}
+
+static int fcgi_set_keyval( char *buf, const char *key, const char *val ) {
 	
-	int klen, vlen, offset = 0;
+	int klen, vlen;
 	
 	klen = strlen( key );
 	vlen = strlen( val );
+
+	if ( klen < 0 || vlen < 0 ) return 0;
+
+	res = 0;
 	
-	if ( klen < 0x80 ) {
-		*msg++ = (uint8_t) _B0( klen );
-		offset++;
+	if ( klen >> 7 ) {
+		*buf++ = (uint8_t) _B3( klen );
+		*buf++ = (uint8_t) _B2( klen );
+		*buf++ = (uint8_t) _B1( klen );
+		*buf++ = (uint8_t) _B0( klen );
+		res += 4;
 	} else {
-		*msg++ = (uint8_t) _B3( klen );
-		*msg++ = (uint8_t) _B2( klen );
-		*msg++ = (uint8_t) _B1( klen );
-		*msg++ = (uint8_t) _B0( klen );
-		offset += 4;
+		*buf++ = (uint8_t) _B0( klen );
+		res += 1;
 	}
 
-	if ( vlen < 0x80 ) {
-		*msg++ = (uint8_t) _B0( vlen );
-		offset++;
+	if ( vlen >> 7 ) {
+		*buf++ = (uint8_t) _B3( vlen );
+		*buf++ = (uint8_t) _B2( vlen );
+		*buf++ = (uint8_t) _B1( vlen );
+		*buf++ = (uint8_t) _B0( vlen );
+		res += 4;
 	} else {
-		*msg++ = (uint8_t) _B3( vlen );
-		*msg++ = (uint8_t) _B2( vlen );
-		*msg++ = (uint8_t) _B1( vlen );
-		*msg++ = (uint8_t) _B0( vlen );
-		offset += 4;
+		*buf++ = (uint8_t) _B0( vlen );
+		res += 1;
 	}
 	
-	memcpy( msg, key, klen );
-	msg += klen;
-	
-	memcpy( msg, val, vlen );
-	msg += vlen;
+	memcpy( buf, key, klen );
+	buf += klen;
+	memcpy( buf, val, vlen );
 
-	offset += klen + vlen;
-
-	return offset;
+	return res + klen + vlen;
 }
 
-
-static int sock_stream, initial_packet_len;
-static struct sockaddr_un sock_options = { 0 };
-static struct manager_custom_hook fcgi_hook = { 0 };
-static char fcgi_request[FCGI_MSG_SZ], fcgi_responce[FCGI_MSG_SZ];
-
-
 static int fcgi_connect( char reconnect ) {
-	int res;
-	
+
 	if ( reconnect && sock_stream ) {
+		read( sock_stream, buffer, FCGI_BUFFER_SIZE );
 		shutdown( sock_stream, SHUT_RDWR );
-		read( sock_stream, fcgi_responce, FCGI_MSG_SZ );
 		close( sock_stream );
 	}
-	sock_stream = socket( AF_UNIX, SOCK_STREAM, 0 );
+	sock_stream = ast_socket_nonblock( AF_UNIX, SOCK_STREAM, 0 );
 	if ( !sock_stream ) {
 		ast_log( AST_LOG_ERROR, "Unable to create socket: %s\n", strerror( errno ) );
 		return -1;
@@ -146,85 +157,106 @@ static int fcgi_connect( char reconnect ) {
 	return 0;
 }
 
-
 static int fcgi_worker( int category, const char *event, char *body ) {
-	static int id = 1;
-	
+	#if KEEPALIVE
+	static uint16_t id = 0;
+	#endif
+	uint16_t len;
 	char *pos, *end;
-	int res, len = initial_packet_len;
-	
-	
-	fcgi_set_header( fcgi_request+0x00, FCGI_BEGIN, id, 0x08 );
+
+	len = 0;
+
+	#if KEEPALIVE
+	id++;
+	#endif
+
+	fcgi_set_header( buffer+0x00, FCGI_BEGIN, PACKET_ID, 0x08 );
+	fcgi_set_options( buffer+0x08, FCGI_RESPONDER, KEEPALIVE );
+	// skip bytes for further FCGI_PARAMS header here
+	len += fcgi_set_keyval( buffer+0x18+len, "SCRIPT_FILENAME", script_filename );
+	len += fcgi_set_keyval( buffer+0x18+len, "REQUEST_METHOD", "GET" );
 
 	pos = strstr( body, ": " );
-	while( pos ) {
+	while( pos && ( len + 0x28 < FCGI_BUFFER_SIZE ) ) {
 		*pos = 0;
 		end = strstr( pos+2, "\r\n" );
-		*end = 0; // #TODO check if null
+		if ( end == NULL ) break;
+		*end = 0;
 		
-		len += fcgi_keyval( fcgi_request+0x18+len, body, pos+2 );
-//		ast_debug( 0, "%s => %s\n", body, pos+2 );
+		len += fcgi_set_keyval( buffer+0x18+len, body, pos+2 );
 		body = end+2;
 		
 		pos = strstr( body, ": " );
 	}
-	
-	res = fcgi_set_header( fcgi_request+0x10, FCGI_PARAMS, id, len );
+
+	res = fcgi_set_header( buffer+0x10, FCGI_PARAMS, PACKET_ID, len );
+
 	for( ; res > 0; res-- ) {
-		fcgi_request[0x18+len] = 0;
+		buffer[0x18+len] = 0;
 		len++;
 	}
-	fcgi_set_header( fcgi_request+0x18+len, FCGI_PARAMS, id, 0x00 );
-	fcgi_set_header( fcgi_request+0x20+len, FCGI_STDIN, id, 0x00 );
-	len += 0x28;
-	res = write( sock_stream, fcgi_request, len );
-	
+	fcgi_set_header( buffer+0x18+len, FCGI_PARAMS, PACKET_ID, 0x00 );
+	fcgi_set_header( buffer+0x20+len, FCGI_STDIN, PACKET_ID, 0x00 );
+	len += 0x28; // including bytes of heading and trailing headers
+
+	#if KEEPALIVE
+	res = write( sock_stream, buffer, len );
 	if ( res < 0 ) {
 		ast_debug( 1, "Failed to write: %s, reconnecting...\n", strerror( errno ) );
-		res = fcgi_connect( 1 );
-		if ( res < 0 ) {
-			ast_log( AST_LOG_ERROR, "Failed to write: %s, giving up...\n", strerror( errno ) );
-		} else {
-			write( sock_stream, fcgi_request, len );
-		}
+		fcgi_connect( 1 );
+		res = write( sock_stream, buffer, len );
 	}
-	
-	res = read( sock_stream, fcgi_responce, FCGI_MSG_SZ );
-	ast_debug( 2, "EOR #%d, write: %d, read: %d\n", id, len, res );
-	
-	id++;
+	#else
+	fcgi_connect( 0 );
+	res = write( sock_stream, buffer, len );
+	#endif
+	ast_debug( 2, "EOR #%d, send: %d\n", PACKET_ID, res );
+	if ( res < 0 ) {
+		ast_log( AST_LOG_ERROR, "Failed to write: %s\n", strerror( errno ) );
+	} else {
+		len = 0;
+		do {
+			usleep( 10 );
+			res = read( sock_stream, buffer, FCGI_BUFFER_SIZE );
+			if ( res >= 0 ) {
+				len += res;
+			}
+		} while ( res == FCGI_BUFFER_SIZE );
+
+		ast_debug( 2, "EOR #%d, recv: %d\n", PACKET_ID, len );
+		if ( len >  FCGI_BUFFER_SIZE ) {
+			ast_log( AST_LOG_NOTICE, "FCGI result too long\n" );
+		} else if ( len > 0 ) {
+			fcgi_get_header( buffer, &pos, &res, &len, &end );
+			if ( *pos == FCGI_STDOUT && res == PACKET_ID ) {
+				buffer[0x08+len] = 0;
+				ast_debug( 3, "%s\n", buffer + 0x08 );
+			}
+		}
+
+	}
+	#if KEEPALIVE
+	#else
+	shutdown( sock_stream, SHUT_RDWR );
+	close( sock_stream );
+	#endif
+
 	return 0;
 }
-
-/* partially filling up packet data
-
-xxxx xxxx | 0x00 header: dynamic, set each time in "fcgi_worker()"
-xxxx xxxx | 0x08 options: static, set once in "load_module()"
-xxxx xxxx | 0x10 data header: dynamic, set each time in "fcgi_worker()"
-xxxx xxxx | 0x18 data: set up "SCRIPT_FILENAME", "GATEWAY_INTERFACE", "REQUEST_METHOD", keep length in "initial_packet_len"
-...       | ... other data, set each time in "fcgi_worker()"
-xxxx xxxx | 0x18 + len + pad: FCGI_PARAMS header, set each time in "fcgi_worker()"
-xxxx xxxx | 0x20 + len + pad: FCGI_PARAMS header, set each time in "fcgi_worker()"
-
-*/
 
 static int load_module( void ) {
 	struct ast_config *cfg;
 	struct ast_flags cfg_flags = { 0 };
 	const char *tmp;
-	
-//	memset( &sock_options, 0, sizeof( struct sockaddr_un ) );
-//	memset( &fcgi_hook, 0, sizeof( struct manager_custom_hook ) );
+
 	cfg = ast_config_load( FCGI_CONFIG, cfg_flags );
-	initial_packet_len = 0;
-	
+
 	if ( cfg == NULL || cfg == CONFIG_STATUS_FILEINVALID ) {
 		ast_log( AST_LOG_ERROR, "Unable to load config: " FCGI_CONFIG "\n" );
 		return AST_MODULE_LOAD_DECLINE;
 	}
-	
-	fcgi_set_options( fcgi_request+0x08, FCGI_RESPONDER, 1 );
-	
+
+
 	sock_options.sun_family = AF_UNIX;
 	if ( ast_variable_browse( cfg, "global" ) ) {
 		tmp = ast_variable_retrieve( cfg, "global", "socket" );
@@ -234,39 +266,49 @@ static int load_module( void ) {
 			ast_log( AST_LOG_NOTICE, "FCGI server socket not specified. Using default: " FCGI_SOCKET "\n" );
 			strcpy( sock_options.sun_path, FCGI_SOCKET );
 		}
-		
+
 		tmp = ast_variable_retrieve( cfg, "global", "script" );
 		if ( tmp ) {
-			initial_packet_len += fcgi_keyval( fcgi_request+0x18+initial_packet_len, "SCRIPT_FILENAME", tmp );
+			if ( strlen( tmp ) < FCGI_SCRIPT_SIZE ) {
+				strcpy( script_filename, tmp );
+			} else {
+				ast_log( AST_LOG_WARNING, "FCGI script path is too long. Using default: " FCGI_SCRIPT "\n" );
+			}
 		} else {
 			ast_log( AST_LOG_NOTICE, "FCGI script not specified. Using default: " FCGI_SCRIPT "\n" );
-			initial_packet_len += fcgi_keyval( fcgi_request+0x18+initial_packet_len, "SCRIPT_FILENAME", FCGI_SCRIPT );
 		}
 	} else {
 		ast_log( AST_LOG_WARNING, "Global section not found, using defaults\n" );
 		strcpy( sock_options.sun_path, FCGI_SOCKET );
-		initial_packet_len += fcgi_keyval( fcgi_request+0x18+initial_packet_len, "SCRIPT_FILENAME", FCGI_SCRIPT );
 	}
 	ast_config_destroy( cfg );
-	
-	initial_packet_len += fcgi_keyval( fcgi_request+0x18+initial_packet_len, "GATEWAY_INTERFACE", "CGI/1.1" );
-	initial_packet_len += fcgi_keyval( fcgi_request+0x18+initial_packet_len, "REQUEST_METHOD", "GET" );
-	
+
+	#if KEEPALIVE
 	fcgi_connect( 0 );
-	
+	#endif
+
 	fcgi_hook.helper = fcgi_worker;
-	
+
 	ast_manager_register_hook( &fcgi_hook );
 	return AST_MODULE_LOAD_SUCCESS;
 }
 
-
 static int unload_module( void ) {
 
 	ast_manager_unregister_hook( &fcgi_hook );
+	#if KEEPALIVE
+	/*
+	fcgi_set_header( buffer+0x00, FCGI_BEGIN, 0, 0x08 );
+	fcgi_set_options( buffer+0x08, FCGI_RESPONDER, 0 );
+	fcgi_set_header( buffer+0x10, FCGI_ABORT, 0, 0x08 );
+	write( sock_stream, buffer, 0x18 );
+	do {
+		res = read( sock_stream, buffer, FCGI_BUFFER_SIZE );
+	} while ( res == FCGI_BUFFER_SIZE );
 	shutdown( sock_stream, SHUT_RDWR );
-	read( sock_stream, fcgi_responce, FCGI_MSG_SZ );
+	*/
 	close( sock_stream );
+	#endif
 	return 0;
 }
 
